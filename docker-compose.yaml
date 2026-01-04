@@ -1,78 +1,171 @@
-version: "3.9"
-
 services:
-  # -------------------------
-  # PostgreSQL 17
-  # -------------------------
+  # ------------------------
+  # AUTO UPDATE (WATCHTOWER)
+  # ------------------------
+  watchtower:
+    image: ghcr.io/containrrr/watchtower:latest
+    restart: always
+    command:
+      - "--label-enable"
+      - "--interval"
+      - "300"            # 5 минут тутам
+      - "--cleanup"
+      - "--rolling-restart"
+      - "--include-restarting"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+
+  # ------------------------
+  # REVERSE PROXY (TRAEFIK)
+  # ------------------------
+  reverse-proxy:
+    image: traefik:v3.6
+    restart: always
+    command:
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+
+      # ENTRYPOINTS
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+
+      # HTTPS + LETSENCRYPT
+      - "--certificatesresolvers.myresolver.acme.tlschallenge=true"
+      - "--certificatesresolvers.myresolver.acme.email=dorjoo@hire-test.cloud"
+      - "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json"
+
+      # (prod-д dashboard унтраасан)
+      # - "--api.insecure=true"
+
+    ports:
+      - "80:80"
+      - "443:443"
+      # - "8080:8080"   # ❌ prod-д нээхгүй
+
+    volumes:
+      - letsencrypt:/letsencrypt
+      - /run/docker.sock:/run/docker.sock:ro
+
+  # ------------------------
+  # DATABASE
+  # ------------------------
   postgres:
     image: postgres:17
-    container_name: postgres
     restart: always
     environment:
       POSTGRES_DB: hire
-      POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: root
+      POSTGRES_USER: dorjoo
+      POSTGRES_PASSWORD: dorjooX0
     volumes:
-      - pg-data:/var/lib/postgresql/data
-    ports:
-      - "5432:5432"
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U postgres"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
+      - pgdata:/var/lib/postgresql/data
 
-  # -------------------------
-  # Redis
-  # -------------------------
   redis:
     image: redis:7
-    container_name: redis
     restart: always
-    command: redis-server --appendonly yes
+    command: ["redis-server", "--appendonly", "yes"]
     volumes:
-      - redis-data:/data
-    ports:
-      - "6379:6379"
+      - redisdata:/data
 
-  # -------------------------
-  # CORE API (NestJS)
-  # -------------------------
+  # ------------------------
+  # CORE BACKEND
+  # ------------------------
   core:
-    build:
-      context: ./hire_backend_core
-      dockerfile: Dockerfile
-    container_name: core
+    build: ./core
     restart: always
-    env_file:
-      - ./hire_backend_core/.env.docker
+    image: ghcr.io/dorjoohover/hire_backend_core:dev
+    environment:
+      PORT: 5000
+      DATABASE_URL: postgres://dorjoo:dorjooX0@postgres:5432/hire
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      RESEND_API_KEY: 
+      EMAIL_FROM: info@hire.mn
+      AWS_ACCESS_KEY: 
+      AWS_SECRET_KEY: 
+      AWS_REGION: 
+      AWS_BUCKET_NAME: 
+      QPAY_CALLBACK: "https://hire-test.cloud/api/api/v1/callback"
+      QPAY_INVOICE_CODE: 'AXIOM_INC_INVOICE'
+      REPORT: https://hire-test.cloud/report/
+      REPORT_PATH:  D:\\projects\\ufe\\hire\\backend\\report\\uploads
+      LOG_DIR: /app/logs
     depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-    ports:
-      - "5000:5000"
+      - postgres
+      - redis
+    labels:
+      - "traefik.enable=true"
+      - "com.centurylinklabs.watchtower.enable=true"
 
-  # -------------------------
-  # REPORT SERVICE (NestJS)
-  # -------------------------
+      # ROUTER
+      - "traefik.http.routers.core.rule=Host(`hire-test.cloud`) && PathPrefix(`/api`)"
+      - "traefik.http.routers.core.entrypoints=websecure"
+      - "traefik.http.routers.core.tls.certresolver=myresolver"
+      - "traefik.http.routers.core.middlewares=core-strip"
+
+      # STRIP /api  ->  /
+      - "traefik.http.middlewares.core-strip.stripprefix.prefixes=/api"
+
+      # SERVICE
+      - "traefik.http.services.core.loadbalancer.server.port=5000"
+
+  # ------------------------
+  # REPORT BACKEND
+  # ------------------------
   report:
-    build:
-      context: ./report
-      dockerfile: Dockerfile
-    container_name: report
+    build: ./report
     restart: always
-    env_file:
-      - ./report/.env.docker
-    depends_on:
-      postgres:
-        condition: service_healthy
-      redis:
-        condition: service_started
-    ports:
-      - "4000:4000"
+    environment:
+      PORT: 4000
+      DATABASE_URL: postgres://dorjoo:dorjooX0@postgres:5432/hire
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      AWS_ACCESS_KEY: 
+      AWS_SECRET_KEY: 
+      AWS_REGION: 
+      AWS_BUCKET_NAME: 
+      CORE: https://hire-test.cloud/api/api/v1
+      LOG_DIR: /app/logs
+      REPORT_PATH: D:\\projects\\ufe\\hire\\backend\\report\\uploads
+    image: ghcr.io/dorjoohover/hire_report:dev
 
+    depends_on:
+      - postgres
+      - redis
+    labels:
+      - "traefik.enable=true"
+      - "com.centurylinklabs.watchtower.enable=true"
+
+      # ROUTER
+      - "traefik.http.routers.report.rule=Host(`hire-test.cloud`) && PathPrefix(`/report`)"
+      - "traefik.http.routers.report.entrypoints=websecure"
+      - "traefik.http.routers.report.tls.certresolver=myresolver"
+      - "traefik.http.routers.report.middlewares=report-strip"
+
+      # STRIP /report  ->  /
+      - "traefik.http.middlewares.report-strip.stripprefix.prefixes=/report"
+
+      # SERVICE
+      - "traefik.http.services.report.loadbalancer.server.port=4000"
+  web:
+    image: ghcr.io/dorjoohover/hire_web:dev
+    restart: always
+    environment:
+      NEXT_PUBLIC_API_URL: https://hire-test.cloud/api
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.web.rule=Host(`hire-test.cloud`)"
+      - "traefik.http.services.web.loadbalancer.server.port=3000"
+  admin:
+    image: ghcr.io/dorjoohover/hire_admin:dev
+    restart: always
+    environment:
+      NEXT_PUBLIC_API_URL: https://hire-test.cloud/api
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.admin.rule=Host(`admin.hire-test.cloud`)"
+      - "traefik.http.services.admin.loadbalancer.server.port=3000"
 volumes:
-  pg-data:
-  redis-data:
+  pgdata:
+  redisdata:
+  letsencrypt:
+
